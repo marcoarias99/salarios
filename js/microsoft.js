@@ -6,7 +6,7 @@
   const config = root.CONFIG_MICROSOFT || {};
   // Permisos delegados que se piden al iniciar sesión: leer el perfil y enviar correo como esa cuenta.
   const PERMISOS = ['User.Read', 'Mail.Send'];
-  // Permiso para guardar el respaldo en SharePoint. Se pide la primera vez que se crea un respaldo.
+  // Permiso para SharePoint (respaldo y lista de envíos). Con SharePoint configurado se pide al iniciar sesión.
   const PERMISOS_SHAREPOINT = ['Sites.ReadWrite.All'];
   const GRAPH_ENVIAR = 'https://graph.microsoft.com/v1.0/me/sendMail';
   const REINTENTOS_POR_LIMITE = 3;
@@ -44,7 +44,8 @@
 
   async function iniciarSesion() {
     if (!app) await iniciar();
-    const respuesta = await app.loginPopup({ scopes: PERMISOS, prompt: 'select_account' });
+    const permisos = config.sharepoint && config.sharepoint.sitio ? [...PERMISOS, ...PERMISOS_SHAREPOINT] : PERMISOS;
+    const respuesta = await app.loginPopup({ scopes: permisos, prompt: 'select_account' });
     cuenta = respuesta.account;
     app.setActiveAccount(cuenta);
     return cuenta;
@@ -120,6 +121,8 @@
     if (status === 401) return 'La sesión venció; inicie sesión de nuevo';
     if (status === 403) return 'Sin permiso para guardar en SharePoint: la cuenta necesita acceso de edición al sitio';
     if (status === 404) return 'No se encontró el sitio de SharePoint; revise la dirección en js/config.js';
+    const texto400 = detalle && detalle.error ? detalle.error.message : '';
+    if (status === 400 && /field|column/i.test(texto400)) return `A la lista de SharePoint le falta una columna o tiene otro nombre (${texto400})`;
     if (status === 507) return 'El espacio de SharePoint está lleno';
     const texto = detalle && detalle.error ? detalle.error.message : '';
     return `Error ${status} de SharePoint${texto ? ': ' + texto : ''}`;
@@ -164,6 +167,49 @@
     return archivo.webUrl;
   }
 
+  // ---------- Lista de envíos ----------
+  // Una fila por boleta enviada. Title lleva la quincena ("2026-10-Q2") y está indexada para buscar rápido.
+
+  const listas = new Map();
+
+  async function idDeLista(sitio, nombre) {
+    const clave = `${sitio}|${nombre}`;
+    if (!listas.has(clave)) {
+      const id = await idDelSitio(sitio);
+      const datos = await graphSharePoint(`https://graph.microsoft.com/v1.0/sites/${id}/lists?$select=id,displayName&$top=200`);
+      const lista = (datos.value || []).find(l => l.displayName.trim().toLowerCase() === nombre.trim().toLowerCase());
+      if (!lista) throw new Error(`No se encontró la lista "${nombre}" en SharePoint`);
+      listas.set(clave, { sitio: id, lista: lista.id });
+    }
+    return listas.get(clave);
+  }
+
+  // Todas las filas de una quincena (sigue las páginas si hay muchas).
+  async function leerEnvios({ sitio, lista, quincena }) {
+    if (!cuenta) throw new Error('No hay sesión iniciada con Microsoft');
+    const ids = await idDeLista(sitio, lista);
+    const filtro = encodeURIComponent(`fields/Title eq '${quincena.replace(/'/g, "''")}'`);
+    let url = `https://graph.microsoft.com/v1.0/sites/${ids.sitio}/lists/${ids.lista}/items` +
+      `?$expand=fields($select=Title,Cedula,Nombre,Correo,Liquido,Fecha,EnviadoPor)&$filter=${filtro}&$top=500`;
+    const filas = [];
+    while (url) {
+      const datos = await graphSharePoint(url, { headers: { Prefer: 'HonorNonIndexedQueriesWarningMayFailRandomly' } });
+      (datos.value || []).forEach(item => filas.push(item.fields || {}));
+      url = datos['@odata.nextLink'] || null;
+    }
+    return filas;
+  }
+
+  async function registrarEnvio({ sitio, lista, campos }) {
+    if (!cuenta) throw new Error('No hay sesión iniciada con Microsoft');
+    const ids = await idDeLista(sitio, lista);
+    await graphSharePoint(`https://graph.microsoft.com/v1.0/sites/${ids.sitio}/lists/${ids.lista}/items`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fields: campos }),
+    });
+  }
+
   // Errores al iniciar sesión, en palabras simples. Devuelve null si la persona cerró la ventana.
   function mensajeDeSesion(e) {
     const codigo = (e && (e.errorCode || e.name)) || '';
@@ -187,6 +233,8 @@
     cerrarSesion,
     enviarCorreo,
     subirArchivo,
+    leerEnvios,
+    registrarEnvio,
     mensajeDeSesion,
     cuenta: () => cuenta,
     sharepoint: () => config.sharepoint || {},

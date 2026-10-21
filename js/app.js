@@ -342,7 +342,6 @@
     const tarjeta = crear('div', { clase: 'opcion otra-quincena' }, [radio, crear('div', {}, [
       crear('strong', { texto: 'Otra quincena' }),
       crear('div', { clase: 'frase-quincena' }, [selQuincena, 'quincena de', selMes, 'de', selAnio]),
-      crear('span', { texto: 'Por ejemplo, una quincena que no se envió a tiempo' }),
     ])]);
     tarjeta.addEventListener('click', e => { if (e.target.tagName !== 'SELECT' && !radio.checked) elegir(); });
     return tarjeta;
@@ -531,11 +530,109 @@
       enviando: false,
       terminado: false, // se terminó una tanda de envío: se muestra el paso 6
       huboReal: false,  // ya salió al menos un correo real: no se puede volver a la planilla
+      revisionLista: { estado: 'sin-revisar' }, // quién ya recibió esta quincena, según la lista de SharePoint
       items: estado.filas.map(f => {
         const revision = revisarEnvio(f);
-        return { fila: f, ...revision, marcado: !revision.bloqueado && !revision.motivo, estado: 'pendiente', hora: null, error: null };
+        return { fila: f, ...revision, marcado: !revision.bloqueado && !revision.motivo, estado: 'pendiente', hora: null, error: null, yaEnviado: null };
       }),
     };
+  }
+
+  // ---------- Lista "Envíos de boletas" en SharePoint ----------
+  // Una fila por boleta enviada de verdad. Al entrar al paso 5 con la sesión iniciada se revisa quién ya
+  // recibió la boleta de esta quincena; esas personas quedan sin marcar (se pueden marcar a mano para reenviar).
+
+  const listaConfigurada = () => { const sp = Microsoft.sharepoint(); return Boolean(sp.sitio && sp.lista); };
+  // Se reconoce a la persona por la cédula o por el correo.
+  const claveCedula = c => String(c || '').replace(/[^0-9A-Za-z]/g, '').toUpperCase();
+  const claveCorreo = c => String(c || '').trim().toLowerCase();
+
+  async function revisarYaEnviados() {
+    const envio = estado.envio;
+    if (!envio || !listaConfigurada() || Microsoft.estado() !== 'conectado') return;
+    if (envio.revisionLista.estado === 'revisando') return;
+    envio.revisionLista = { estado: 'revisando' };
+    mostrarEnvio();
+    try {
+      const sp = Microsoft.sharepoint();
+      const filas = await Microsoft.leerEnvios({ sitio: sp.sitio, lista: sp.lista, quincena: Respaldo.codigoQuincena(estado.periodo) });
+      if (estado.envio !== envio) return; // se cambió la planilla mientras tanto
+      const ultimo = new Map(); // el envío más reciente de cada persona, por cédula y por correo
+      const anotar = (clave, previo) => {
+        if (!ultimo.has(clave) || previo.momento > ultimo.get(clave).momento) ultimo.set(clave, previo);
+      };
+      filas.forEach(r => {
+        const previo = { momento: new Date(r.Fecha), por: r.EnviadoPor || '' };
+        anotar('c:' + claveCedula(r.Cedula), previo);
+        anotar('m:' + claveCorreo(r.Correo), previo);
+      });
+      ultimo.delete('c:');
+      ultimo.delete('m:');
+      envio.items.forEach(item => {
+        item.yaEnviado = ultimo.get('c:' + claveCedula(item.fila.cedula)) || ultimo.get('m:' + claveCorreo(item.fila.correo)) || null;
+        if (item.yaEnviado && item.estado === 'pendiente') item.marcado = false;
+      });
+      envio.revisionLista = { estado: 'listo' };
+    } catch (e) {
+      console.error(e);
+      if (estado.envio !== envio) return;
+      envio.revisionLista = { estado: 'error', error: e.message || 'error desconocido' };
+    }
+    mostrarEnvio();
+  }
+
+  // Aviso del paso 5 con el resultado de la revisión.
+  function mostrarRevisionLista() {
+    const caja = $('#envio-lista');
+    const revision = estado.envio.revisionLista;
+    const visible = listaConfigurada() && Microsoft.estado() === 'conectado' && revision.estado !== 'sin-revisar';
+    caja.hidden = !visible;
+    if (!visible) return;
+    const quincena = P.etiquetaQuincena(estado.periodo).toLowerCase();
+    if (revision.estado === 'revisando') {
+      caja.replaceChildren(alerta('info', `Revisando en SharePoint quién ya recibió la boleta de la ${quincena}…`));
+    } else if (revision.estado === 'error') {
+      const boton = crear('button', { type: 'button', clase: 'boton secundario pequeno', texto: 'Revisar de nuevo' });
+      boton.addEventListener('click', revisarYaEnviados);
+      caja.replaceChildren(crear('div', { clase: 'alerta error' }, [
+        crear('strong', { texto: 'No se pudo revisar en SharePoint quién ya recibió esta boleta. ' }),
+        `${revision.error}. Revise antes de enviar para no repetir correos. `,
+        boton,
+      ]));
+    } else {
+      const ya = estado.envio.items.filter(i => i.yaEnviado).length;
+      caja.replaceChildren(ya
+        ? alerta('aviso', `${ya === 1 ? '1 persona ya recibió' : `${ya} personas ya recibieron`} la boleta de la ${quincena} (según SharePoint). ` +
+            (ya === 1 ? 'Quedó sin marcar; márquela' : 'Quedaron sin marcar; márquelas') + ' a mano solo si quiere reenviarla.')
+        : alerta('ok', `Según SharePoint, nadie ha recibido todavía la boleta de la ${quincena}.`));
+    }
+  }
+
+  // Agrega a la lista la boleta que se acaba de enviar. Si falla, el correo igual quedó enviado.
+  async function registrarEnLista(item) {
+    const sp = Microsoft.sharepoint();
+    const f = item.fila;
+    try {
+      await Microsoft.registrarEnvio({
+        sitio: sp.sitio,
+        lista: sp.lista,
+        campos: {
+          Title: Respaldo.codigoQuincena(estado.periodo),
+          Cedula: String(f.cedula || ''),
+          Nombre: f.nombre || '',
+          Correo: f.correo || '',
+          Liquido: f.liquido,
+          Fecha: item.momento.toISOString(),
+          EnviadoPor: Microsoft.correo(),
+        },
+      });
+      item.registro = 'ok';
+      item.registroError = null;
+    } catch (e) {
+      console.error(e);
+      item.registro = 'error';
+      item.registroError = e.message || 'error desconocido';
+    }
   }
 
   function mostrarVista(envio) {
@@ -549,6 +646,7 @@
     mostrarVista(true);
     $('#envio-periodo').textContent = `${P.etiquetaQuincena(estado.periodo)} · ${empleados(estado.filas.length)}`;
     mostrarEnvio();
+    if (estado.envio.revisionLista.estado === 'sin-revisar') revisarYaEnviados();
   });
   $('#btn-volver').addEventListener('click', () => mostrarVista(false));
 
@@ -559,6 +657,7 @@
     if (item.estado === 'enviado') return [item.simulado ? `Simulado ${item.hora}` : `Enviado ${item.hora}`, 'ok'];
     if (item.estado === 'enviando') return ['Enviando…', 'enviando'];
     if (item.estado === 'error') return [`Error: ${item.error}`, 'error'];
+    if (!item.marcado && item.yaEnviado) return ['Ya enviada', 'ya'];
     if (!item.marcado) return ['No se enviará', 'excluido'];
     return ['Pendiente', 'pendiente'];
   }
@@ -581,10 +680,12 @@
     $('#btn-volver').hidden = estado.envio.enviando || estado.envio.huboReal;
     $('.envio-acciones').hidden = estado.envio.terminado;
     mostrarFinal();
+    mostrarRevisionLista();
 
     const boton = $('#btn-enviar');
-    boton.disabled = estado.envio.enviando || porEnviar === 0;
-    boton.textContent = estado.envio.enviando ? 'Enviando…' :
+    const revisando = estado.envio.revisionLista.estado === 'revisando';
+    boton.disabled = estado.envio.enviando || revisando || porEnviar === 0;
+    boton.textContent = estado.envio.enviando ? 'Enviando…' : revisando ? 'Revisando SharePoint…' :
       ENVIO.modo === 'prueba'
         ? `Simular envío de ${porEnviar} ${porEnviar === 1 ? 'boleta' : 'boletas'}`
         : `Enviar ${porEnviar} ${porEnviar === 1 ? 'boleta' : 'boletas'} (real)`;
@@ -605,6 +706,8 @@
           crear('strong', { texto: item.fila.nombre || `Fila ${item.fila.filaExcel}` }),
           crear('span', { texto: item.fila.correo || 'Sin correo' }),
           item.motivo ? crear('span', { clase: 'item-motivo', texto: item.motivo }) : '',
+          item.yaEnviado ? crear('span', { clase: 'item-ya', texto:
+            `Ya enviada el ${Respaldo.fechaHora(item.yaEnviado.momento)}${item.yaEnviado.por ? ` por ${item.yaEnviado.por}` : ''}` }) : '',
         ]),
         crear('span', { clase: 'estado-envio ' + clase, texto }),
       ]);
@@ -646,7 +749,17 @@
     setTimeout(() => URL.revokeObjectURL(enlace.href), 2000);
   });
 
+  // Advertencias para la confirmación del envío real.
+  function avisoReenvio(lista) {
+    let texto = '';
+    const reenvios = lista.filter(i => i.yaEnviado).length;
+    if (reenvios) texto += ` ATENCIÓN: ${reenvios === 1 ? '1 de ellas ya se había enviado' : `${reenvios} de ellas ya se habían enviado`} antes y se enviará de nuevo.`;
+    if (listaConfigurada() && estado.envio.revisionLista.estado === 'error') texto += ' No se pudo revisar en SharePoint quién ya la recibió.';
+    return texto;
+  }
+
   // Envía una por una y confirma cada correo en la lista (enviado con la hora, o el error para reintentar).
+  // En el envío real cada correo enviado se anota en la lista de SharePoint y al final se guarda el respaldo.
   async function enviarMarcados() {
     const lista = pendientesMarcados();
     if (!lista.length) return;
@@ -654,7 +767,7 @@
     const pregunta = prueba
       ? `Se simulará el envío de ${lista.length} boletas de ${P.etiquetaQuincena(estado.periodo)}. No se enviará ningún correo. ¿Continuar?`
       : `ENVÍO REAL: se ${lista.length === 1 ? 'enviará 1 correo' : `enviarán ${lista.length} correos`} a los empleados, desde ${Microsoft.correo()}, ` +
-        `con las boletas de ${P.etiquetaQuincena(estado.periodo)}. Esto no se puede deshacer. ¿Continuar?`;
+        `con las boletas de ${P.etiquetaQuincena(estado.periodo)}.` + avisoReenvio(lista) + ' Esto no se puede deshacer. ¿Continuar?';
     if (!confirm(pregunta)) return;
 
     estado.envio.enviando = true;
@@ -676,7 +789,9 @@
         item.estado = 'error';
         item.momento = new Date();
         item.error = e.message || 'no se pudo enviar';
+        continue;
       }
+      if (!prueba && listaConfigurada()) await registrarEnLista(item);
     }
     estado.envio.enviando = false;
     estado.envio.terminado = true;
@@ -685,6 +800,7 @@
     mostrarConexion();
     mostrarEnvio();
     window.scrollTo(0, 0);
+    if (!prueba && Microsoft.sharepoint().sitio && Microsoft.estado() === 'conectado') crearRespaldo();
   }
 
   $('#btn-enviar').addEventListener('click', enviarMarcados);
@@ -717,15 +833,41 @@
       aviso = alerta('error', `${errores.length === 1 ? '1 boleta no se pudo enviar' : `${errores.length} boletas no se pudieron enviar`}:`,
         errores.map(i => `${i.fila.nombre}: ${i.error}`));
     } else if (real) {
-      aviso = alerta('ok', `Listo: todas las boletas marcadas se enviaron. Las copias están en Elementos enviados de ${cuenta}.`);
+      aviso = alerta('ok', `Correos: todas las boletas marcadas se enviaron. Las copias están en Elementos enviados de ${cuenta}.`);
     } else {
       aviso = alerta('info', Microsoft.estado() === 'conectado'
         ? 'Para enviarlas de verdad, elija Modo de envío → Real y vuelva a enviar.'
         : 'Para enviarlas de verdad, inicie sesión con Microsoft y elija Modo de envío → Real.');
     }
     $('#final-aviso').replaceChildren(aviso);
+    mostrarRegistroFinal(real ? envio.items.filter(i => i.estado === 'enviado' && !i.simulado && i.registro) : []);
     $('#btn-reintentar').hidden = !errores.length;
     $('#btn-reintentar').textContent = `Reintentar ${errores.length === 1 ? 'la que falló' : `las ${errores.length} que fallaron`}`;
+  }
+
+  // Confirmación de que cada boleta enviada quedó anotada en la lista de SharePoint.
+  function mostrarRegistroFinal(enviados) {
+    const caja = $('#final-registro');
+    if (!enviados.length) { caja.replaceChildren(); return; }
+    const fallidos = enviados.filter(i => i.registro === 'error');
+    const lista = Microsoft.sharepoint().lista;
+    if (!fallidos.length) {
+      caja.replaceChildren(alerta('ok', `Registro: ${enviados.length === 1 ? 'la boleta enviada quedó anotada' : `las ${enviados.length} boletas enviadas quedaron anotadas`} en la lista "${lista}" de SharePoint.`));
+      return;
+    }
+    const boton = crear('button', { type: 'button', clase: 'boton secundario pequeno', texto: 'Anotar de nuevo' });
+    boton.addEventListener('click', async () => {
+      boton.disabled = true;
+      boton.textContent = 'Anotando…';
+      for (const item of fallidos) await registrarEnLista(item);
+      mostrarFinal();
+    });
+    caja.replaceChildren(crear('div', { clase: 'alerta error' }, [
+      crear('strong', { texto: `Registro: ${fallidos.length === 1 ? '1 boleta enviada no se pudo anotar' : `${fallidos.length} boletas enviadas no se pudieron anotar`} en la lista "${lista}". ` }),
+      'Los correos sí se enviaron. ',
+      boton,
+      crear('ul', {}, fallidos.map(i => crear('li', { texto: `${i.fila.nombre}: ${i.registroError}` }))),
+    ]));
   }
 
   // ---------- Respaldo (paso 6) ----------
@@ -741,7 +883,8 @@
     setTimeout(() => URL.revokeObjectURL(enlace.href), 2000);
   }
 
-  $('#btn-respaldo').addEventListener('click', async () => {
+  // Se llama sola al terminar un envío real (con SharePoint configurado) y con el botón "Crear respaldo".
+  async function crearRespaldo() {
     const envio = estado.envio;
     const real = envio.finalizado.real;
     const momento = new Date();
@@ -750,6 +893,7 @@
     const resultado = $('#final-respaldo');
     boton.disabled = true;
     boton.textContent = 'Creando respaldo…';
+    resultado.replaceChildren(alerta('info', 'Respaldo: guardando la planilla y el registro de envío…'));
     try {
       const planilla = await P.construirExcel(ExcelJS, { filas: estado.filas }).xlsx.writeBuffer();
       const registro = await Respaldo.construirRegistro(ExcelJS, {
@@ -764,7 +908,7 @@
         const urlRegistro = await Microsoft.subirArchivo({ sitio: sharepoint.sitio, ruta: `${carpeta}/${nombres.registro}`, contenido: registro, tipo });
         const urlCarpeta = urlRegistro.slice(0, urlRegistro.lastIndexOf('/'));
         resultado.replaceChildren(crear('div', { clase: 'alerta ok' }, [
-          crear('strong', { texto: `Respaldo guardado en SharePoint a las ${hora(momento)}: ` }),
+          crear('strong', { texto: `Respaldo: guardado en SharePoint (${hora(momento)}). ` }),
           crear('a', { href: urlCarpeta, target: '_blank', rel: 'noopener', texto: `abrir la carpeta ${carpeta}` }),
           crear('ul', {}, [crear('li', { texto: nombres.planilla }), crear('li', { texto: nombres.registro })]),
         ]));
@@ -780,12 +924,14 @@
       }
     } catch (e) {
       console.error(e);
-      resultado.replaceChildren(alerta('error', `No se pudo crear el respaldo: ${e.message}`));
+      resultado.replaceChildren(alerta('error', `Respaldo: no se pudo guardar (${e.message}). Use "Crear respaldo" para intentarlo de nuevo.`));
     } finally {
       boton.disabled = false;
       boton.textContent = 'Crear respaldo';
     }
-  });
+  }
+
+  $('#btn-respaldo').addEventListener('click', crearRespaldo);
 
   $('#btn-reintentar').addEventListener('click', () => {
     estado.envio.items.filter(i => i.estado === 'error').forEach(i => { i.estado = 'pendiente'; i.marcado = true; i.error = null; });
@@ -849,7 +995,10 @@
       r.disabled = Boolean(estado.envio && estado.envio.enviando);
     });
     if (conectado && !$('#prueba-para').value) $('#prueba-para').value = Microsoft.correo();
-    if (estado.envio && !$('#vista-envio').hidden) mostrarEnvio();
+    if (estado.envio && !$('#vista-envio').hidden) {
+      mostrarEnvio();
+      if (conectado && estado.envio.revisionLista.estado === 'sin-revisar') revisarYaEnviados();
+    }
   }
 
   $('#btn-microsoft').addEventListener('click', async () => {

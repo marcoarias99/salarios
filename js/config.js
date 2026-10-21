@@ -7,9 +7,11 @@ window.CONFIG_MICROSOFT = {
   tenantId: '828971ca-4f6e-45ca-babc-10e584888f50',
   // Respaldo en SharePoint. Mientras "sitio" esté vacío, el respaldo se descarga en la computadora.
   sharepoint: {
-    // Dirección del sitio, por ejemplo 'https://zodiac.sharepoint.com/sites/Planillas'
-    sitio: '',
-    // Carpeta dentro de "Documentos" donde se guardan los respaldos
-    carpeta: 'Boletas de pago',
+    // Dirección del sitio Administración
+    sitio: 'https://zodiac353.sharepoint.com/sites/administracion',
+    // Carpeta dentro de "Documents" donde se guardan los respaldos
+    carpeta: 'Salarios/Boletas de pago',
+    // Lista con una fila por boleta enviada (quincena en Title, Cedula, Nombre, Correo, Liquido, Fecha, EnviadoPor)
+    lista: 'Envíos de boletas',
   },
 };

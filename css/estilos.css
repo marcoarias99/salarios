@@ -225,11 +225,14 @@ select, input[type="number"] {
 
 /* ---------- Quincenas ---------- */
 
+/* Las cuatro opciones en una fila; 2 y 2 en pantallas medianas; una debajo de otra en el teléfono. */
 .opciones {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  grid-template-columns: 1fr 1fr 1fr 1.5fr; /* "Otra quincena" lleva las listas y necesita más ancho */
   gap: 10px;
 }
+@media (max-width: 1000px) { .opciones { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 560px) { .opciones { grid-template-columns: 1fr; } }
 .opcion {
   display: flex;
   gap: 10px;
@@ -243,9 +246,8 @@ select, input[type="number"] {
 .opcion input { margin-top: 3px; accent-color: var(--azul); }
 .opcion strong { display: block; }
 .opcion span { font-size: 13px; color: var(--texto-suave); }
-.otra-quincena { grid-column: 1 / -1; }
-.frase-quincena { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0 6px; font-weight: 600; }
-.frase-quincena select { font: inherit; font-weight: 600; padding: 6px 10px; border: 1px solid var(--borde); border-radius: 8px; background: #fff; cursor: pointer; }
+.frase-quincena { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; font-weight: 600; }
+.frase-quincena select { font: inherit; font-weight: 600; padding: 4px 6px; border: 1px solid var(--borde); border-radius: 8px; background: #fff; cursor: pointer; }
 
 /* ---------- Tablas ---------- */
 
@@ -341,12 +343,16 @@ dialog form label { display: flex; flex-direction: column; gap: 5px; margin-bott
 .item-datos strong { font-size: 14px; }
 .item-datos span { font-size: 12px; color: var(--texto-suave); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .item-datos .item-motivo { color: #8a5a00; white-space: normal; }
+.item-datos .item-ya { color: var(--verde); white-space: normal; }
 .estado-envio { font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 999px; white-space: nowrap; }
 .estado-envio.pendiente { background: var(--fondo); color: var(--texto-suave); border: 1px solid var(--borde); }
 .estado-envio.enviando { background: var(--azul-suave); color: var(--azul); }
 .estado-envio.ok { background: #e7f5ee; color: var(--verde); }
 .estado-envio.error { background: var(--rojo-suave); color: var(--rojo); white-space: normal; max-width: 140px; }
 .estado-envio.excluido { background: var(--amarillo); color: #6b4e00; }
+.estado-envio.ya { background: #e7f5ee; color: var(--verde); border: 1px solid #b9e0cb; }
+#envio-lista .alerta { margin: 0 0 12px; }
+.boton.pequeno { padding: 4px 10px; font-size: 12px; margin-left: 4px; }
 
 .vista-previa { min-width: 0; }
 .previa-encabezado { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
