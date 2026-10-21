@@ -12,6 +12,8 @@
   const SIN_APROBACION = 'SharePoint todavía no está aprobado para esta aplicación: falta que un administrador de Microsoft 365 dé el permiso';
   const GRAPH_ENVIAR = 'https://graph.microsoft.com/v1.0/me/sendMail';
   const REINTENTOS_POR_LIMITE = 3;
+  // Si Microsoft no responde en este tiempo se deja de esperar (el envío no se queda colgado).
+  const ESPERA_MAXIMA_MS = 60000;
 
   let app = null;
   let cuenta = null;
@@ -76,14 +78,27 @@
     const codigo = detalle && detalle.error ? detalle.error.code : '';
     if (status === 401) return 'La sesión venció; inicie sesión de nuevo';
     if (status === 403) return 'Sin permiso para enviar correo (permiso Mail.Send de la aplicación)';
+    if (status === 429) return 'Microsoft pidió esperar (demasiados correos seguidos); reintente en unos minutos';
     if (codigo === 'ErrorInvalidRecipients' || status === 400) return 'Dirección de correo no válida';
     if (codigo === 'ErrorQuotaExceeded' || codigo === 'ErrorMessageSubmissionBlocked') return 'El buzón no puede enviar más correos por ahora';
     const texto = detalle && detalle.error ? detalle.error.message : '';
     return `Error ${status}${texto ? ': ' + texto : ''}`;
   }
 
+  // Error de envío con dos marcas para el paso 5:
+  // - incierto: no hubo respuesta clara (sin conexión, tiempo agotado, error 5xx de Microsoft), así que el
+  //   correo PUDO haber salido. No se reintenta solo: hay que revisar Elementos enviados.
+  // - detener: la sesión o el permiso fallan y fallarían todos los siguientes.
+  function errorDeEnvio(mensaje, { incierto = false, detener = false } = {}) {
+    const e = new Error(mensaje);
+    e.incierto = incierto;
+    e.detener = detener;
+    return e;
+  }
+
   // Envía un correo HTML desde la cuenta conectada y deja copia en Elementos enviados.
-  // Microsoft responde 202 cuando acepta el correo; si pide esperar (429), se reintenta.
+  // Microsoft responde 202 cuando acepta el correo; si pide esperar (429), se reintenta (el 429 significa
+  // que no lo aceptó, así que reintentar no duplica).
   async function enviarCorreo({ para, nombre, asunto, html }) {
     if (!cuenta) throw new Error('No hay sesión iniciada con Microsoft');
     const cuerpo = JSON.stringify({
@@ -95,22 +110,37 @@
       saveToSentItems: true,
     });
     for (let intento = 0; ; intento++) {
+      let token;
+      try {
+        token = await obtenerToken();
+      } catch (e) {
+        throw errorDeEnvio(mensajeDeSesion(e) || 'La sesión venció; inicie sesión de nuevo', { detener: true });
+      }
       let respuesta;
+      const control = new AbortController();
+      const reloj = setTimeout(() => control.abort(), ESPERA_MAXIMA_MS);
       try {
         respuesta = await fetch(GRAPH_ENVIAR, {
           method: 'POST',
-          headers: { Authorization: `Bearer ${await obtenerToken()}`, 'Content-Type': 'application/json' },
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
           body: cuerpo,
+          signal: control.signal,
         });
       } catch (e) {
-        throw new Error('Sin conexión con Microsoft; revise el internet');
+        throw errorDeEnvio(e.name === 'AbortError'
+          ? 'Microsoft no respondió a tiempo; puede que sí haya salido, revise Elementos enviados antes de reenviar'
+          : 'Se cortó la conexión; puede que sí haya salido, revise Elementos enviados antes de reenviar', { incierto: true });
+      } finally {
+        clearTimeout(reloj);
       }
       if (respuesta.status === 202) return;
       if (respuesta.status === 429 && intento < REINTENTOS_POR_LIMITE) {
-        await esperar((Number(respuesta.headers.get('Retry-After')) || 10) * 1000);
+        await esperar(Math.min(Number(respuesta.headers.get('Retry-After')) || 10, 120) * 1000);
         continue;
       }
-      throw new Error(mensajeDeError(respuesta.status, await respuesta.json().catch(() => null)));
+      const mensaje = mensajeDeError(respuesta.status, await respuesta.json().catch(() => null));
+      if (respuesta.status >= 500) throw errorDeEnvio(`${mensaje}; puede que sí haya salido, revise Elementos enviados antes de reenviar`, { incierto: true });
+      throw errorDeEnvio(mensaje, { detener: respuesta.status === 401 || respuesta.status === 403 });
     }
   }
 
@@ -203,7 +233,7 @@
       `?$expand=fields($select=Title,Cedula,Nombre,Correo,Liquido,Fecha,EnviadoPor)&$filter=${filtro}&$top=500`;
     const filas = [];
     while (url) {
-      const datos = await graphSharePoint(url, { headers: { Prefer: 'HonorNonIndexedQueriesWarningMayFailRandomly' } });
+      const datos = await graphSharePoint(url);
       (datos.value || []).forEach(item => filas.push(item.fields || {}));
       url = datos['@odata.nextLink'] || null;
     }

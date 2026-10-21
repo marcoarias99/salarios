@@ -554,7 +554,7 @@
   async function revisarYaEnviados() {
     const envio = estado.envio;
     if (!envio || !listaConfigurada() || Microsoft.estado() !== 'conectado') return;
-    if (envio.revisionLista.estado === 'revisando') return;
+    if (envio.revisionLista.estado === 'revisando' || envio.enviando) return;
     envio.revisionLista = { estado: 'revisando' };
     mostrarEnvio();
     try {
@@ -603,6 +603,7 @@
       ]));
     } else if (revision.estado === 'error') {
       const boton = crear('button', { type: 'button', clase: 'boton secundario pequeno', texto: 'Revisar de nuevo' });
+      boton.disabled = estado.envio.enviando;
       boton.addEventListener('click', revisarYaEnviados);
       caja.replaceChildren(crear('div', { clase: 'alerta error' }, [
         crear('strong', { texto: 'No se pudo revisar en SharePoint quién ya recibió esta boleta. ' }),
@@ -701,13 +702,14 @@
         : `Enviar ${porEnviar} ${porEnviar === 1 ? 'boleta' : 'boletas'} (real)`;
     const marcables = items.filter(i => !i.bloqueado && i.estado !== 'enviado');
     $('#chk-todos').checked = marcables.length > 0 && marcables.every(i => i.marcado);
-    $('#chk-todos').disabled = estado.envio.enviando;
+    $('#chk-todos').disabled = estado.envio.enviando || revisando;
 
     $('#lista-envio').replaceChildren(...items.map((item, i) => {
       const [texto, clase] = textoEstado(item);
       const casilla = crear('input', { type: 'checkbox', 'aria-label': `Enviar a ${item.fila.nombre}` });
       casilla.checked = item.marcado;
-      casilla.disabled = item.bloqueado || item.estado === 'enviado' || estado.envio.enviando;
+      casilla.disabled = item.bloqueado || item.estado === 'enviado' || estado.envio.enviando ||
+        estado.envio.revisionLista.estado === 'revisando'; // la revisión podría desmarcar lo que se marque ahora
       casilla.addEventListener('click', e => e.stopPropagation());
       casilla.addEventListener('change', () => { item.marcado = casilla.checked; mostrarEnvio(); });
       const li = crear('li', { clase: 'item-envio' + (i === estado.envio.actual ? ' actual' : '') }, [
@@ -736,8 +738,11 @@
     $('#btn-anterior').disabled = actual === 0;
     $('#btn-siguiente').disabled = actual === items.length - 1;
     const marco = $('#previa');
+    const html = Boleta.html(fila);
+    if (marco.dataset.fila === String(actual) && marco.srcdoc === html) return; // misma boleta: no se recarga
+    marco.dataset.fila = String(actual);
     marco.onload = () => { marco.style.height = marco.contentDocument.documentElement.scrollHeight + 'px'; };
-    marco.srcdoc = Boleta.html(fila);
+    marco.srcdoc = html;
   }
 
   $('#btn-anterior').addEventListener('click', () => { estado.envio.actual--; mostrarEnvio(); });
@@ -771,6 +776,7 @@
   // Envía una por una y confirma cada correo en la lista (enviado con la hora, o el error para reintentar).
   // En el envío real cada correo enviado se anota en la lista de SharePoint y al final se guarda el respaldo.
   async function enviarMarcados() {
+    if (estado.envio.enviando) return; // un segundo clic no arranca otra tanda
     const lista = pendientesMarcados();
     if (!lista.length) return;
     const prueba = ENVIO.modo === 'prueba';
@@ -782,10 +788,14 @@
 
     estado.envio.enviando = true;
     estado.envio.terminado = false;
+    estado.envio.detenido = null;
     if (!prueba) estado.envio.huboReal = true;
     mostrarConexion();
-    for (const [n, item] of lista.entries()) {
-      if (!prueba && n > 0) await esperar(PAUSA_ENTRE_CORREOS_MS);
+    let ultimo = 0; // cuándo empezó el correo anterior: la pausa descuenta lo que ya tardó
+    for (const item of lista) {
+      const falta = PAUSA_ENTRE_CORREOS_MS - (Date.now() - ultimo);
+      if (!prueba && ultimo && falta > 0) await esperar(falta);
+      ultimo = Date.now();
       item.estado = 'enviando';
       mostrarEnvio();
       try {
@@ -799,8 +809,12 @@
         item.estado = 'error';
         item.momento = new Date();
         item.error = e.message || 'no se pudo enviar';
+        item.incierto = Boolean(e.incierto);
+        // Sin sesión o sin permiso fallarían todos los siguientes: se detiene y quedan pendientes.
+        if (e.detener) { estado.envio.detenido = item.error; break; }
         continue;
       }
+      item.incierto = false;
       if (!prueba && usarLista()) await registrarEnLista(item);
     }
     estado.envio.enviando = false;
@@ -838,8 +852,14 @@
       indicador('No se enviaron', String(noEnviados.length), 'Sin marcar o sin correo válido'),
     );
 
+    const dudosas = errores.filter(i => i.incierto);
+    const paraReintentar = reintentables();
     let aviso;
-    if (errores.length) {
+    if (envio.detenido) {
+      const quedan = envio.items.filter(i => i.marcado && i.estado === 'pendiente').length;
+      aviso = alerta('error', `Se detuvo el envío: ${envio.detenido}. ${quedan ? `Quedan ${quedan} sin enviar. ` : ''}` +
+        'Inicie sesión de nuevo (botón arriba a la derecha) y use "Reintentar".', errores.map(i => `${i.fila.nombre}: ${i.error}`));
+    } else if (errores.length) {
       aviso = alerta('error', `${errores.length === 1 ? '1 boleta no se pudo enviar' : `${errores.length} boletas no se pudieron enviar`}:`,
         errores.map(i => `${i.fila.nombre}: ${i.error}`));
     } else if (real) {
@@ -851,8 +871,10 @@
     }
     $('#final-aviso').replaceChildren(aviso);
     mostrarRegistroFinal(real ? envio.items.filter(i => i.estado === 'enviado' && !i.simulado && i.registro) : []);
-    $('#btn-reintentar').hidden = !errores.length;
-    $('#btn-reintentar').textContent = `Reintentar ${errores.length === 1 ? 'la que falló' : `las ${errores.length} que fallaron`}`;
+    $('#btn-reintentar').hidden = !paraReintentar.length;
+    $('#btn-reintentar').textContent = `Reintentar ${paraReintentar.length === 1 ? '1 boleta' : `${paraReintentar.length} boletas`}`;
+    $('#btn-dudosas').hidden = !dudosas.length;
+    $('#btn-dudosas').textContent = `Reenviar ${dudosas.length === 1 ? 'la dudosa' : `las ${dudosas.length} dudosas`}`;
   }
 
   // Confirmación de que cada boleta enviada quedó anotada en la lista de SharePoint.
@@ -954,9 +976,29 @@
 
   $('#btn-respaldo').addEventListener('click', crearRespaldo);
 
-  $('#btn-reintentar').addEventListener('click', () => {
-    estado.envio.items.filter(i => i.estado === 'error').forEach(i => { i.estado = 'pendiente'; i.marcado = true; i.error = null; });
+  // Lo que se puede reintentar sin riesgo de duplicar: errores claros (Microsoft no aceptó el correo) y las
+  // marcadas que quedaron pendientes porque el envío se detuvo. Las dudosas tienen su propio botón.
+  function reintentables() {
+    return estado.envio.items.filter(i => (i.estado === 'error' && !i.incierto) || (i.marcado && i.estado === 'pendiente'));
+  }
+
+  function reintentar(lista) {
+    if (estado.envio.enviando) return;
+    // Solo se envía lo de esta lista: todo lo demás que no salió queda sin marcar (también los errores).
+    estado.envio.items.forEach(i => { if (i.estado !== 'enviado') i.marcado = false; });
+    lista.forEach(i => { i.estado = 'pendiente'; i.marcado = true; i.error = null; });
     enviarMarcados();
+  }
+
+  $('#btn-reintentar').addEventListener('click', () => reintentar(reintentables()));
+
+  // Dudosas: Microsoft no respondió, así que el correo pudo haber salido. Se reenvían solo si se confirma.
+  $('#btn-dudosas').addEventListener('click', () => {
+    const dudosas = estado.envio.items.filter(i => i.estado === 'error' && i.incierto);
+    if (!confirm(`${dudosas.length === 1 ? 'Esta boleta pudo' : `Estas ${dudosas.length} boletas pudieron`} haber salido aunque Microsoft no respondió: ` +
+      `${dudosas.map(i => i.fila.nombre).join(', ')}.\n\nRevise primero Elementos enviados de ${Microsoft.correo()}. ` +
+      '¿Ya lo revisó y quiere reenviarlas?')) return;
+    reintentar(dudosas);
   });
 
   // Cierra este envío y vuelve al paso 1 vacío. El modo vuelve a "Simulado" para que nada salga por accidente.
