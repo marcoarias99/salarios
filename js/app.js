@@ -543,6 +543,10 @@
   // recibió la boleta de esta quincena; esas personas quedan sin marcar (se pueden marcar a mano para reenviar).
 
   const listaConfigurada = () => { const sp = Microsoft.sharepoint(); return Boolean(sp.sitio && sp.lista); };
+  // SharePoint necesita la aprobación de un administrador; mientras no la tenga se envía igual, sin lista
+  // y con el respaldo descargado.
+  const sinAprobacion = () => Boolean(estado.envio && estado.envio.revisionLista.estado === 'sin-aprobacion');
+  const usarLista = () => listaConfigurada() && !sinAprobacion();
   // Se reconoce a la persona por la cédula o por el correo.
   const claveCedula = c => String(c || '').replace(/[^0-9A-Za-z]/g, '').toUpperCase();
   const claveCorreo = c => String(c || '').trim().toLowerCase();
@@ -576,7 +580,7 @@
     } catch (e) {
       console.error(e);
       if (estado.envio !== envio) return;
-      envio.revisionLista = { estado: 'error', error: e.message || 'error desconocido' };
+      envio.revisionLista = e.codigo === 'sin-aprobacion' ? { estado: 'sin-aprobacion' } : { estado: 'error', error: e.message || 'error desconocido' };
     }
     mostrarEnvio();
   }
@@ -591,6 +595,12 @@
     const quincena = P.etiquetaQuincena(estado.periodo).toLowerCase();
     if (revision.estado === 'revisando') {
       caja.replaceChildren(alerta('info', `Revisando en SharePoint quién ya recibió la boleta de la ${quincena}…`));
+    } else if (revision.estado === 'sin-aprobacion') {
+      caja.replaceChildren(crear('div', { clase: 'alerta info' }, [
+        crear('strong', { texto: 'SharePoint todavía no está aprobado ' }),
+        '(falta el permiso de un administrador de Microsoft 365). Puede enviar igual, pero no se revisa quién ya recibió ' +
+          'la boleta, el envío no se anota en la lista y el respaldo se descarga en la computadora.',
+      ]));
     } else if (revision.estado === 'error') {
       const boton = crear('button', { type: 'button', clase: 'boton secundario pequeno', texto: 'Revisar de nuevo' });
       boton.addEventListener('click', revisarYaEnviados);
@@ -754,7 +764,7 @@
     let texto = '';
     const reenvios = lista.filter(i => i.yaEnviado).length;
     if (reenvios) texto += ` ATENCIÓN: ${reenvios === 1 ? '1 de ellas ya se había enviado' : `${reenvios} de ellas ya se habían enviado`} antes y se enviará de nuevo.`;
-    if (listaConfigurada() && estado.envio.revisionLista.estado === 'error') texto += ' No se pudo revisar en SharePoint quién ya la recibió.';
+    if (listaConfigurada() && ['error', 'sin-aprobacion'].includes(estado.envio.revisionLista.estado)) texto += ' No se pudo revisar en SharePoint quién ya la recibió.';
     return texto;
   }
 
@@ -791,7 +801,7 @@
         item.error = e.message || 'no se pudo enviar';
         continue;
       }
-      if (!prueba && listaConfigurada()) await registrarEnLista(item);
+      if (!prueba && usarLista()) await registrarEnLista(item);
     }
     estado.envio.enviando = false;
     estado.envio.terminado = true;
@@ -800,7 +810,7 @@
     mostrarConexion();
     mostrarEnvio();
     window.scrollTo(0, 0);
-    if (!prueba && Microsoft.sharepoint().sitio && Microsoft.estado() === 'conectado') crearRespaldo();
+    if (!prueba && Microsoft.sharepoint().sitio && Microsoft.estado() === 'conectado' && !sinAprobacion()) crearRespaldo();
   }
 
   $('#btn-enviar').addEventListener('click', enviarMarcados);
@@ -848,6 +858,12 @@
   // Confirmación de que cada boleta enviada quedó anotada en la lista de SharePoint.
   function mostrarRegistroFinal(enviados) {
     const caja = $('#final-registro');
+    const huboReales = estado.envio.items.some(i => i.estado === 'enviado' && !i.simulado);
+    if (huboReales && listaConfigurada() && sinAprobacion()) {
+      caja.replaceChildren(alerta('info', 'Registro: SharePoint todavía no está aprobado, así que este envío no quedó anotado en la lista. ' +
+        'El registro de envío del respaldo sí lo guarda.'));
+      return;
+    }
     if (!enviados.length) { caja.replaceChildren(); return; }
     const fallidos = enviados.filter(i => i.registro === 'error');
     const lista = Microsoft.sharepoint().lista;
@@ -901,27 +917,32 @@
       }).xlsx.writeBuffer();
 
       const sharepoint = Microsoft.sharepoint();
-      if (sharepoint.sitio && Microsoft.estado() === 'conectado') {
-        const carpeta = `${(sharepoint.carpeta || 'Boletas de pago').replace(/\/+$/, '')}/${Respaldo.carpeta(estado.periodo)}`;
-        const tipo = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-        await Microsoft.subirArchivo({ sitio: sharepoint.sitio, ruta: `${carpeta}/${nombres.planilla}`, contenido: planilla, tipo });
-        const urlRegistro = await Microsoft.subirArchivo({ sitio: sharepoint.sitio, ruta: `${carpeta}/${nombres.registro}`, contenido: registro, tipo });
-        const urlCarpeta = urlRegistro.slice(0, urlRegistro.lastIndexOf('/'));
-        resultado.replaceChildren(crear('div', { clase: 'alerta ok' }, [
-          crear('strong', { texto: `Respaldo: guardado en SharePoint (${hora(momento)}). ` }),
-          crear('a', { href: urlCarpeta, target: '_blank', rel: 'noopener', texto: `abrir la carpeta ${carpeta}` }),
-          crear('ul', {}, [crear('li', { texto: nombres.planilla }), crear('li', { texto: nombres.registro })]),
-        ]));
-      } else {
-        descargar(nombres.planilla, planilla);
-        await new Promise(r => setTimeout(r, 400)); // algunos navegadores ignoran dos descargas seguidas
-        descargar(nombres.registro, registro);
-        const motivo = sharepoint.sitio
-          ? 'Inicie sesión con Microsoft para guardarlo en SharePoint.'
-          : 'SharePoint todavía no está configurado (js/config.js).';
-        resultado.replaceChildren(alerta('info', `Respaldo descargado en esta computadora (carpeta Descargas). ${motivo}`,
-          [nombres.planilla, nombres.registro]));
+      if (sharepoint.sitio && Microsoft.estado() === 'conectado' && !sinAprobacion()) {
+        try {
+          const carpeta = `${(sharepoint.carpeta || 'Boletas de pago').replace(/\/+$/, '')}/${Respaldo.carpeta(estado.periodo)}`;
+          const tipo = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+          await Microsoft.subirArchivo({ sitio: sharepoint.sitio, ruta: `${carpeta}/${nombres.planilla}`, contenido: planilla, tipo });
+          const urlRegistro = await Microsoft.subirArchivo({ sitio: sharepoint.sitio, ruta: `${carpeta}/${nombres.registro}`, contenido: registro, tipo });
+          const urlCarpeta = urlRegistro.slice(0, urlRegistro.lastIndexOf('/'));
+          resultado.replaceChildren(crear('div', { clase: 'alerta ok' }, [
+            crear('strong', { texto: `Respaldo: guardado en SharePoint (${hora(momento)}). ` }),
+            crear('a', { href: urlCarpeta, target: '_blank', rel: 'noopener', texto: `abrir la carpeta ${carpeta}` }),
+            crear('ul', {}, [crear('li', { texto: nombres.planilla }), crear('li', { texto: nombres.registro })]),
+          ]));
+          return;
+        } catch (e) {
+          if (e.codigo !== 'sin-aprobacion') throw e;
+          envio.revisionLista = { estado: 'sin-aprobacion' }; // se descarga en su lugar
+        }
       }
+      descargar(nombres.planilla, planilla);
+      await new Promise(r => setTimeout(r, 400)); // algunos navegadores ignoran dos descargas seguidas
+      descargar(nombres.registro, registro);
+      const motivo = !sharepoint.sitio ? 'SharePoint todavía no está configurado (js/config.js).'
+        : Microsoft.estado() !== 'conectado' ? 'Inicie sesión con Microsoft para guardarlo en SharePoint.'
+        : 'SharePoint todavía no está aprobado (falta el permiso de un administrador de Microsoft 365).';
+      resultado.replaceChildren(alerta('info', `Respaldo descargado en esta computadora (carpeta Descargas). ${motivo}`,
+        [nombres.planilla, nombres.registro]));
     } catch (e) {
       console.error(e);
       resultado.replaceChildren(alerta('error', `Respaldo: no se pudo guardar (${e.message}). Use "Crear respaldo" para intentarlo de nuevo.`));

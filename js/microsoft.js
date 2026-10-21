@@ -6,8 +6,10 @@
   const config = root.CONFIG_MICROSOFT || {};
   // Permisos delegados que se piden al iniciar sesión: leer el perfil y enviar correo como esa cuenta.
   const PERMISOS = ['User.Read', 'Mail.Send'];
-  // Permiso para SharePoint (respaldo y lista de envíos). Con SharePoint configurado se pide al iniciar sesión.
+  // Permiso para SharePoint (respaldo y lista de envíos). Necesita la aprobación de un administrador de
+  // Microsoft 365, así que NO se pide al iniciar sesión: se usa solo si ya está aprobado (sin ventanas).
   const PERMISOS_SHAREPOINT = ['Sites.ReadWrite.All'];
+  const SIN_APROBACION = 'SharePoint todavía no está aprobado para esta aplicación: falta que un administrador de Microsoft 365 dé el permiso';
   const GRAPH_ENVIAR = 'https://graph.microsoft.com/v1.0/me/sendMail';
   const REINTENTOS_POR_LIMITE = 3;
 
@@ -44,8 +46,7 @@
 
   async function iniciarSesion() {
     if (!app) await iniciar();
-    const permisos = config.sharepoint && config.sharepoint.sitio ? [...PERMISOS, ...PERMISOS_SHAREPOINT] : PERMISOS;
-    const respuesta = await app.loginPopup({ scopes: permisos, prompt: 'select_account' });
+    const respuesta = await app.loginPopup({ scopes: PERMISOS, prompt: 'select_account' });
     cuenta = respuesta.account;
     app.setActiveAccount(cuenta);
     return cuenta;
@@ -129,12 +130,21 @@
   }
 
   async function graphSharePoint(url, opciones = {}) {
+    let token;
+    try {
+      token = (await app.acquireTokenSilent({ scopes: PERMISOS_SHAREPOINT, account: cuenta })).accessToken;
+    } catch (e) {
+      // Sin la aprobación del administrador Microsoft pide una ventana de consentimiento: no se abre.
+      const sinAprobacion = e instanceof root.msal.InteractionRequiredAuthError ||
+        /consent|interaction_required|AADSTS65001|AADSTS90094/i.test(`${(e && e.errorCode) || ''} ${(e && e.message) || ''}`);
+      const error = new Error(sinAprobacion ? SIN_APROBACION : (mensajeDeSesion(e) || 'No se pudo conectar con SharePoint'));
+      if (sinAprobacion) error.codigo = 'sin-aprobacion';
+      throw error;
+    }
     let respuesta;
     try {
-      const token = await obtenerToken(PERMISOS_SHAREPOINT);
       respuesta = await fetch(url, { ...opciones, headers: { Authorization: `Bearer ${token}`, ...(opciones.headers || {}) } });
     } catch (e) {
-      if (e && e.errorCode) throw new Error(mensajeDeSesion(e) || 'Se canceló el permiso para SharePoint');
       throw new Error('Sin conexión con Microsoft; revise el internet');
     }
     const datos = await respuesta.json().catch(() => null);
