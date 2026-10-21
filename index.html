@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Boletas de pago</title>
+  <link rel="stylesheet" href="css/estilos.css">
+</head>
+<body>
+  <header class="barra">
+    <div class="marca">
+      <span class="logo" aria-hidden="true">₡</span>
+      <div>
+        <h1>Boletas de pago</h1>
+        <p>Planilla quincenal</p>
+      </div>
+    </div>
+    <div class="barra-acciones">
+      <span class="etiqueta-prueba" id="etiqueta-modo" title="Los correos a empleados se simulan">Modo prueba</span>
+      <button type="button" id="btn-microsoft" class="boton secundario boton-microsoft">Iniciar sesión con Microsoft</button>
+      <button type="button" id="btn-tasas" class="boton secundario">Tasas</button>
+    </div>
+  </header>
+
+  <main id="vista-planilla">
+    <section id="paso-subir" class="tarjeta">
+      <h2><span class="paso-num">1</span> Subir archivo</h2>
+      <label id="zona" class="zona">
+        <input type="file" id="archivo" accept=".xlsx,.xlsm,.xls,.csv" hidden>
+        <span class="zona-icono" aria-hidden="true">⬆</span>
+        <strong>Arrastre aquí el archivo de Excel o CSV</strong>
+        <span>o haga clic para seleccionarlo</span>
+      </label>
+      <div id="archivo-cargado" class="archivo-cargado" hidden>
+        <span class="archivo-icono" aria-hidden="true">📄</span>
+        <div>
+          <strong id="archivo-nombre"></strong>
+          <span id="archivo-detalle"></span>
+        </div>
+        <button type="button" id="btn-otro" class="boton secundario">Subir otro archivo</button>
+      </div>
+      <p id="error" class="alerta error" role="alert" hidden></p>
+      <p class="plantilla-ayuda">
+        ¿El archivo no se lee bien?
+        <button type="button" id="btn-plantilla" class="boton enlace">Descargue la plantilla en Excel</button>
+        y copie los datos en ella.
+      </p>
+    </section>
+
+    <section id="paso-leido" class="tarjeta" hidden>
+      <h2><span class="paso-num">2</span> Esto es lo que encontramos</h2>
+      <div id="resumen-lectura" class="indicadores"></div>
+      <div id="avisos"></div>
+      <details class="columnas">
+        <summary id="resumen-columnas">Columnas encontradas</summary>
+        <ul id="lista-columnas"></ul>
+      </details>
+      <div class="tabla-envoltura"><table id="tabla-leida"></table></div>
+    </section>
+
+    <section id="paso-quincena" class="tarjeta" hidden>
+      <h2><span class="paso-num">3</span> ¿Para qué quincena?</h2>
+      <div id="opciones-quincena" class="opciones" role="radiogroup"></div>
+    </section>
+
+    <section id="paso-resultado" class="tarjeta" hidden>
+      <div class="encabezado-paso">
+        <h2><span class="paso-num">4</span> Resultado</h2>
+        <div class="acciones-paso">
+          <div class="ayuda" id="ayuda">
+            <button type="button" id="btn-ayuda" class="boton-ayuda" aria-expanded="false" aria-controls="ayuda-panel">
+              <span aria-hidden="true">ⓘ</span> ¿Cómo se calcula?
+            </button>
+            <div id="ayuda-panel" class="ayuda-panel" role="dialog" aria-label="Cómo se calculan las columnas automáticas"></div>
+          </div>
+          <button type="button" id="btn-descargar" class="boton primario">Descargar Excel</button>
+        </div>
+      </div>
+      <p class="sub" id="detalle-resultado"></p>
+      <div id="avisos-resultado"></div>
+      <div id="totales" class="indicadores"></div>
+      <div class="tabla-envoltura"><table id="tabla-resultado"></table></div>
+      <div class="pie-paso">
+        <p class="sub">Revise cada boleta tal como la recibirá el empleado y envíelas por correo.</p>
+        <button type="button" id="btn-ir-envio" class="boton primario">Revisar y enviar boletas →</button>
+      </div>
+    </section>
+  </main>
+
+  <main id="vista-envio" hidden>
+    <section id="paso-final" class="tarjeta paso-final" hidden>
+      <h2><span class="paso-num">6</span> <span id="final-titulo">Envío terminado</span></h2>
+      <p class="sub" id="final-detalle"></p>
+      <div id="final-resumen" class="indicadores"></div>
+      <div id="final-aviso"></div>
+      <div id="final-respaldo"></div>
+      <div class="final-acciones">
+        <button type="button" id="btn-respaldo" class="boton secundario">Crear respaldo</button>
+        <button type="button" id="btn-reintentar" class="boton secundario" hidden>Reintentar los que fallaron</button>
+        <span class="espacio"></span>
+        <button type="button" id="btn-nuevo" class="boton primario">Empezar un nuevo envío</button>
+      </div>
+    </section>
+
+    <section class="tarjeta">
+      <div class="encabezado-paso">
+        <h2><span class="paso-num">5</span> Revisar y enviar boletas</h2>
+        <button type="button" id="btn-volver" class="boton secundario">← Volver a la planilla</button>
+      </div>
+      <p class="sub" id="envio-periodo"></p>
+      <div class="alerta info" id="envio-modo">
+        <strong>Modo prueba:</strong> no se envía ningún correo. El envío se simula para revisar el proceso.
+        Para enviar de verdad hay que conectar la cuenta de Microsoft 365 de la empresa.
+      </div>
+      <div class="envio-conexion" id="envio-conexion" hidden>
+        <fieldset class="modo-envio">
+          <legend>Modo de envío</legend>
+          <label><input type="radio" name="modo-envio" value="prueba" checked> <span><strong>Simulado</strong> · no se envía nada</span></label>
+          <label><input type="radio" name="modo-envio" value="real"> <span><strong>Real</strong> · cada empleado recibe su boleta desde <span id="modo-cuenta"></span></span></label>
+        </fieldset>
+        <div class="envio-prueba">
+          <label for="prueba-para">Enviar la boleta que se ve abajo como prueba a:</label>
+          <div class="envio-prueba-fila">
+            <input type="email" id="prueba-para" autocomplete="email" placeholder="correo@ejemplo.com">
+            <button type="button" id="btn-prueba" class="boton secundario">Enviar prueba</button>
+            <span id="prueba-resultado" class="resultado-prueba" role="status"></span>
+          </div>
+        </div>
+      </div>
+      <div id="envio-resumen" class="indicadores"></div>
+      <div class="envio-acciones">
+        <label class="marcar-todos"><input type="checkbox" id="chk-todos"> Seleccionar todos los que se pueden enviar</label>
+        <span class="espacio"></span>
+        <button type="button" id="btn-enviar" class="boton primario">Enviar</button>
+      </div>
+    </section>
+
+    <div class="envio-cuerpo">
+      <section class="tarjeta lista-envio">
+        <h3>Empleados</h3>
+        <ul id="lista-envio"></ul>
+      </section>
+      <section class="tarjeta vista-previa">
+        <div class="previa-encabezado">
+          <div class="previa-datos">
+            <div><span>Para:</span> <strong id="previa-para"></strong></div>
+            <div><span>Asunto:</span> <strong id="previa-asunto"></strong></div>
+          </div>
+          <div class="previa-botones">
+            <button type="button" id="btn-anterior" class="boton secundario" aria-label="Boleta anterior">‹</button>
+            <span id="previa-posicion"></span>
+            <button type="button" id="btn-siguiente" class="boton secundario" aria-label="Boleta siguiente">›</button>
+            <button type="button" id="btn-eml" class="boton secundario" title="Abre el correo en Outlook, listo para enviar">Descargar correo (.eml)</button>
+          </div>
+        </div>
+        <iframe id="previa" title="Vista previa del correo"></iframe>
+      </section>
+    </div>
+  </main>
+
+  <dialog id="dialogo-tasas">
+    <form method="dialog" id="form-tasas">
+      <h2>Tasas de cargas laborales</h2>
+      <p class="sub">Se aplican sobre el salario bruto quincenal. Quedan guardadas en este navegador.</p>
+      <label>Enfermedad y maternidad (%)
+        <input type="number" step="0.01" min="0" max="100" id="tasa-sem" required>
+      </label>
+      <label>Invalidez, vejez y muerte (%)
+        <input type="number" step="0.01" min="0" max="100" id="tasa-ivm" required>
+      </label>
+      <label>Banco Popular (%)
+        <input type="number" step="0.01" min="0" max="100" id="tasa-banco" required>
+      </label>
+      <div class="dialogo-acciones">
+        <button type="button" id="btn-restaurar" class="boton enlace">Restaurar valores por defecto</button>
+        <span class="espacio"></span>
+        <button type="button" id="btn-cancelar" class="boton secundario">Cancelar</button>
+        <button type="submit" class="boton primario">Guardar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="vendor/xlsx.full.min.js"></script>
+  <script src="vendor/exceljs.min.js"></script>
+  <script src="vendor/msal-browser.min.js"></script>
+  <script src="js/config.js"></script>
+  <script src="js/microsoft.js"></script>
+  <script src="js/planilla.js"></script>
+  <script src="js/boleta.js"></script>
+  <script src="js/respaldo.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
